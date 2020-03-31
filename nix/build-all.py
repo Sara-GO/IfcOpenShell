@@ -60,6 +60,10 @@ import shutil
 import time
 import tarfile
 import multiprocessing
+import platform
+import sysconfig
+from datetime import datetime
+
 
 PYTHON_MAJOR = sys.version_info[0]
 
@@ -71,6 +75,13 @@ else:
     # might be around one day
     from urllib import urlretrieve
 
+import argparse
+
+# parse command line parameters
+parser = argparse.ArgumentParser()
+parser.add_argument("-usp", "--use_system_python", help="use system instaled Python for bulding", action="store_true")
+args = parser.parse_args()
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -79,7 +90,8 @@ ch.setLevel(logging.INFO)
 logger.addHandler(ch)
 
 PROJECT_NAME="IfcOpenShell"
-PYTHON_VERSIONS=["2.7.16", "3.2.6", "3.3.6", "3.4.6", "3.5.3", "3.6.2", "3.7.3"]
+#PYTHON_VERSIONS=["2.7.16", "3.2.6", "3.3.6", "3.4.6", "3.5.3", "3.6.2", "3.7.3"]
+PYTHON_VERSIONS=["3.7.5"]
 JSON_VERSION="v3.6.1"
 OCE_VERSION="0.18"
 # OCCT_VERSION="7.1.0"
@@ -89,7 +101,7 @@ OCE_VERSION="0.18"
 OCCT_VERSION="7.3.0p3"
 BOOST_VERSION="1.59.0"
 #PCRE_VERSION="8.39"
-PCRE_VERSION="8.41"
+PCRE_VERSION="8.43"
 #LIBXML2_VERSION="2.9.3"
 LIBXML2_VERSION="2.9.9"
 CMAKE_VERSION="3.4.3"
@@ -139,7 +151,8 @@ def which(cmd):
     return None
 
 def get_os():
-    ret_value = sp.check_output([uname, "-s"]).strip()
+    #    ret_value = to_pystring(sp.check_output([uname, "-s"]).strip())
+    ret_value = platform.system()
     return ret_value
 
 def to_pystring(x):
@@ -168,18 +181,15 @@ except KeyError:
 try:
     TARGET_ARCH = os.environ["TARGET_ARCH"]
 except KeyError:
-    TARGET_ARCH = sp.check_output([uname, "-m"]).strip()
+    TARGET_ARCH = platform.uname()[4]
 
 CMAKE_DIR=os.path.realpath(os.path.join("..", "cmake"))
 
 try:
     DEPS_DIR = os.environ["DEPS_DIR"]
 except KeyError:
-    path = [b"..", b"build", sp.check_output(uname).strip(), TARGET_ARCH]
-    if TOOLSET:
-        path.append(TOOLSET)
-        
-    DEPS_DIR = to_pystring(os.path.realpath(os.path.join(*path)))
+    path = ['..', 'build', platform.system(), platform.release(), TARGET_ARCH]
+    DEPS_DIR = os.path.realpath(os.path.join(*path))
 
 if not os.path.exists(DEPS_DIR):
     os.makedirs(DEPS_DIR)
@@ -194,6 +204,9 @@ except KeyError:
 
 cecho ("""This script fetches and builds %s and its dependencies
 """ % (PROJECT_NAME,), BLACK_ON_WHITE)
+if args.use_system_python:
+    cecho("Use of system Python is turned on ", RED)
+
 cecho("""Script configuration:
 
 """, GREEN)
@@ -752,11 +765,37 @@ if "IfcOpenShell-Python" in targets:
         if not os.path.exists(python_dir):
             os.makedirs(python_dir)
 
-        PYTHON_LIBRARY=run([bash, "-c", "ls    {DEPS_DIR}/install/python-{PYTHON_VERSION}{TAG}/lib/libpython*.*".format(**locals())])
-        PYTHON_INCLUDE=run([bash, "-c", "ls -d {DEPS_DIR}/install/python-{PYTHON_VERSION}{TAG}/include/python*".format(**locals())])
-        PYTHON_EXECUTABLE=os.path.join(DEPS_DIR, "install", "python-{PYTHON_VERSION}{TAG}".format(**locals()), "bin", "python{PYTHON_VERSION[0]}".format(**locals()))
+        if args.use_system_python:
+            # idea is to use system installed python located in "which python" or "which python3"
+            # find system python site-specific home folder and extract its version from its path
+            # tail is home folder of the system python installation denoted by version number (i.e. Mac OS X, 3.7 = major.minor)
+            if get_os() == "Darwin":
+                head,tail = os.path.split(sys.exec_prefix)
+                # extract individual version numbers from the python version currently used for the build process
+                major,minor,revision = PYTHON_VERSION.split('.')
+            
+                # determine full path for homedir of the system python
+                system_python_dir = "{head}/{major}.{minor}".format(**locals())
+            
+                # determine key python folders to use during the build process
+                PYTHON_EXECUTABLE= "{system_python_dir}/bin/python{major}.{minor}".format(**locals())
+                PYTHON_LIBRARY= "{system_python_dir}/lib/libpython*.*".format(**locals())
+                PYTHON_INCLUDE= "{system_python_dir}/include/python{major}.{minor}m".format(**locals())
+            else:
+                # ToDo implement also for Linux
+                cecho("Use of system Python on Linux not supported yet", RED)
+        else:
+            PYTHON_LIBRARY=run([bash, "-c", "ls    {DEPS_DIR}/install/python-{PYTHON_VERSION}{TAG}/lib/libpython*.*".format(**locals())])
+            PYTHON_INCLUDE=run([bash, "-c", "ls -d {DEPS_DIR}/install/python-{PYTHON_VERSION}{TAG}/include/python*".format(**locals())])
+            PYTHON_EXECUTABLE=os.path.join(DEPS_DIR, "install", "python-{PYTHON_VERSION}{TAG}".format(**locals()), "bin", "python{PYTHON_VERSION[0]}".format(**locals()))
+            
+        cecho("System python version %s used: " % (PYTHON_VERSION,), GREEN)
+        logger.info("\rPYTHON_EXECUTABLE = %s""" % (PYTHON_EXECUTABLE,))
+        logger.info("\rPYTHON_LIBRARY = %s""" % (PYTHON_LIBRARY,))
+        logger.info("\rPYTHON_INCLUDE = %s""" % (PYTHON_INCLUDE,))
+        
         os.environ["PYTHON_LIBRARY_BASENAME"]=os.path.basename(PYTHON_LIBRARY)
-
+        
         run_cmake("",
             cmake_args=[
                 "-DBUILD_SHARED_LIBS="       "OFF" if BUILD_STATIC else "ON",
@@ -778,12 +817,19 @@ if "IfcOpenShell-Python" in targets:
         run([make, "-j%s" % (IFCOS_NUM_BUILD_PROCS,), "_ifcopenshell_wrapper"], cwd=python_dir)
         run([make, "install/local"], cwd=os.path.join(python_dir, "ifcwrap"))
 
-        module_dir = os.path.dirname(run([PYTHON_EXECUTABLE, "-c", "from __future__ import print_function; import inspect, ifcopenshell; print(inspect.getfile(ifcopenshell))"]))
-
-        if get_os() != "Darwin":
+        # here build with swig 4.0 will break the process, use swig 3.0.12 for the time being
+        ifcos_built_dir = to_pystring(run([PYTHON_EXECUTABLE, "-c", "import os, ifcopenshell; print(os.path.dirname(ifcopenshell.__file__))"]))
+        logger.info("IfcOpenShell package built to: %s" % (ifcos_built_dir))
+        
+        if get_os() == "Darwin":
             # TODO: This symbol name depends on the Python version?
-            run([strip, "-s", "-K", "PyInit__ifcopenshell_wrapper", "_ifcopenshell_wrapper.so"], cwd=module_dir)
+            run([strip, "-x", "_ifcopenshell_wrapper.so"], cwd=ifcos_built_dir)
+        else:
+            # ToDo: needs to be tested on non Mac OS X platforms!
+            run([strip, "-s", "-K", "PyInit__ifcopenshell_wrapper", "_ifcopenshell_wrapper.so"], cwd=ifcos_built_dir)
 
-        run([cp, "-R", module_dir, os.path.join(DEPS_DIR, "install", "ifcopenshell", "python-%s%s" % (PYTHON_VERSION, TAG))])
+        ifcos_archive_dir = os.path.join(DEPS_DIR, "install", "ifcopenshell", "python-%s%s" % (PYTHON_VERSION, TAG))
+        logger.info("IfcOpenShell package copied to: %s" % (ifcos_archive_dir))
+        run([cp, "-R", ifcos_built_dir, ifcos_archive_dir])
 
 logger.info("\rBuilt IfcOpenShell...\n\n")
